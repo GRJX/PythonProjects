@@ -6,7 +6,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Zip files in a folder into multiple zip files based on a max size.")
     parser.add_argument('-src', '--source', required=True, help="Source folder path")
     parser.add_argument('-dist', '--destination', required=True, help="Destination folder path")
-    parser.add_argument('-max', '--maxsize', type=int, default=20, help="Maximum zip file size in megabytes")
+    parser.add_argument('-max', '--maxsize', type=int, default=1000, help="Maximum zip file size in megabytes")
     
     return parser.parse_args()
 
