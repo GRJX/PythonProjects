@@ -10,4 +10,6 @@ The project is organized into different folders for each utility. Here's what yo
   
 - `~/ConvertToHeic`: Includes a script for converting images to the HEIC format. This folder also has its own README with instructions for setup and operation.
 
+- `~/CompressVideo`: Contains a utility for compressing video files to a target size in megabytes while maintaining the best possible quality. See the README in this folder for detailed usage instructions.
+
 Be sure to navigate to each folder and refer to their individual README files for more detailed guidance on how to install and use the scripts provided.
