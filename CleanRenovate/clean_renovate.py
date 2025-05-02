@@ -10,21 +10,21 @@ class Nexus:
         """
         Initialize the Nexus class with a Playwright browser
         """
+        # Load environment variables from .env file
+        load_dotenv()
+        self.base_url = os.getenv("BASE_URL")
+        if not self.base_url:
+            raise ValueError("BASE_URL not found in .env file")
+        # Ensure base_url ends with a slash
+        if not self.base_url.endswith('/'):
+            self.base_url += '/'
+            
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(headless=headless)
         self.page = self.browser.new_page()
         self.page.set_default_timeout(10000)  # Set global timeout to 10 seconds (10000ms)
         self.is_logged_in = False
-    
-    def __del__(self):
-        """
-        Clean up resources when the object is destroyed
-        """
-        if hasattr(self, 'browser') and self.browser:
-            self.browser.close()
-        if hasattr(self, 'playwright') and self.playwright:
-            self.playwright.stop()
-    
+
     def login(self):
         """
         Login to the Nexus repository using credentials from .env file
@@ -33,16 +33,14 @@ class Nexus:
             return
             
         # Load environment variables from .env file
-        load_dotenv()
-        
         username = os.getenv("USERNAME")
         password = os.getenv("PASSWORD")
         
         if not username or not password:
             raise ValueError("Username or password not found in .env file")
         
-        # Navigate to login page
-        login_url = "https://nexus.dictus.iesprd.ictu-sr.nl/"
+        # Navigate to login page using base_url
+        login_url = self.base_url
         self.page.goto(login_url)
         
         # Fill in login form
@@ -70,8 +68,8 @@ class Nexus:
         tags = []
 
         for fetch_tag in fetch_tags:
-            # Navigate to the tags page
-            tags_url = f"https://nexus.dictus.iesprd.ictu-sr.nl/service/rest/repository/browse/docker-hosted/v2/kwm/{fetch_tag}/tags"
+            # Navigate to the tags page using base_url
+            tags_url = f"{self.base_url}service/rest/repository/browse/docker-hosted/v2/kwm/{fetch_tag}/tags"
             self.page.goto(tags_url)
             
             # Wait for the table to load
@@ -101,8 +99,8 @@ class Nexus:
         if not self.is_logged_in:
             self.login()
             
-        # Navigate to search URL with the tag
-        search_url = f"https://nexus.dictus.iesprd.ictu-sr.nl/#browse/search=attributes.docker.imageTag%3D{tag}"
+        # Navigate to search URL with the tag using base_url
+        search_url = f"{self.base_url}#browse/search=attributes.docker.imageTag%3D{tag}"
         self.page.goto(search_url)
         
         # Wait for the page and search results to load
@@ -112,7 +110,7 @@ class Nexus:
         # Fill in the search text and hit Enter to confirm
         self.page.fill('#nx-coreui-searchcriteria-text-1233-inputEl', tag)
         self.page.press('#nx-coreui-searchcriteria-text-1233-inputEl', 'Enter')
-        
+
         # Check if search results contain any items and get count
         items = self.page.query_selector_all('//tbody/tr/td[2]/div[contains(.,"kwm")]')
         
