@@ -242,13 +242,37 @@ class MediaMetadataProcessor:
         Returns:
             List of pattern-matching filenames
         """
-        pattern = self.generate_file_pattern(title)
-        regex = re.compile(pattern, re.IGNORECASE)
+        # Get the base name without extension from the title
+        title_base = Path(title).stem
+        
+        # Create multiple patterns to handle different variations
+        patterns = []
+        
+        # Pattern 1: Exact base match (e.g., IMG_123 matches IMG_123.jpg, IMG_123.mp4)
+        patterns.append(f"^{re.escape(title_base)}\\.")
+        
+        # Pattern 2: Base with additional suffixes (e.g., IMG_123-EFFECTS matches IMG_123-EFFECTS-edited.jpg)
+        # This handles cases where the media file has additional text after the JSON title
+        patterns.append(f"^{re.escape(title_base)}[\\-_].*")
+        
+        # Pattern 3: For truncated titles (46 char limit), try matching longer filenames
+        if len(title_base) >= 46:
+            # Remove common truncation patterns and try broader match
+            truncated_base = title_base[:40]  # Use even shorter base for broader matching
+            patterns.append(f"^{re.escape(truncated_base)}.*")
+        
         matching_files = []
         
-        for filename in self.media_file_index:
-            if filename not in excluded_files and regex.match(filename):
-                matching_files.append(filename)
+        for pattern_str in patterns:
+            try:
+                regex = re.compile(pattern_str, re.IGNORECASE)
+                for filename in self.media_file_index:
+                    if filename not in excluded_files and regex.match(filename):
+                        if filename not in matching_files:  # Avoid duplicates
+                            matching_files.append(filename)
+            except re.error as e:
+                self.logger.warning(f"Invalid regex pattern '{pattern_str}': {e}")
+                continue
         
         return matching_files
 
@@ -654,10 +678,14 @@ class MediaMetadataProcessor:
             else:
                 self.logger.info(f"Running in STANDARD mode - processing {len(json_files_to_process)} JSON files")
             
+            # Track files and processing results across phases
+            exact_matched_media_files = set()
+            pattern_matched_media_files = set()
+            successfully_processed_json_files = set()
+            json_to_media_mapping = {}  # Track which JSON files processed which media files
+            
             # Phase 2: Two-Phase Metadata-Driven Processing
             self.logger.info("Starting Phase 1: Exact filename matching...")
-            exact_matched_files = set()
-            exact_match_results = []
             
             # Phase 2a: Exact matching pass
             for json_path in json_files_to_process:
@@ -666,31 +694,143 @@ class MediaMetadataProcessor:
                     title, timestamp = metadata
                     exact_matches = self.find_exact_matching_media_files(title)
                     if exact_matches:
-                        exact_match_results.append((json_path, title, timestamp, exact_matches))
-                        exact_matched_files.update(exact_matches)
                         self.logger.debug(f"Exact match: {json_path.name} -> {exact_matches}")
+                        
+                        # Process each matching media file
+                        processed_files = []
+                        all_successful = True
+                        files_copied_this_json = 0
+                        
+                        for filename in exact_matches:
+                            source_path = self.media_file_index[filename]
+                            
+                            # Mark as accounted for
+                            self.accounted_for_media.add(filename)
+                            exact_matched_media_files.add(filename)
+                            
+                            # Calculate destination and process file
+                            destination = self.calculate_destination_path(source_path, filename)
+                            
+                            # Check if already processed
+                            if self.check_file_already_processed(destination, timestamp):
+                                self.logger.debug(f"Skipping already processed file: {filename}")
+                                processed_files.append(source_path)
+                                continue
+                            
+                            # Handle collisions
+                            if destination.exists():
+                                destination = self.handle_filename_collision(destination)
+                            
+                            # Copy and timestamp
+                            if self.copy_and_timestamp_file(source_path, destination, timestamp):
+                                files_copied_this_json += 1
+                                processed_files.append(source_path)
+                                self.logger.info(f"Processed (exact): {filename} -> {destination.name}")
+                            else:
+                                all_successful = False
+                                self.processing_results['copy_errors'] += 1
+                                self.processing_results['failed_items'].append({
+                                    'type': 'media',
+                                    'file': str(source_path),
+                                    'reason': 'Copy operation failed'
+                                })
+                        
+                        # Update processing counts
+                        self.processing_results['json_processed'] += 1
+                        self.processing_results['media_processed'] += len(exact_matches)
+                        self.processing_results['files_copied'] += files_copied_this_json
+                        
+                        if all_successful:
+                            self.processing_results['json_successful'] += 1
+                            successfully_processed_json_files.add(json_path)
+                            json_to_media_mapping[json_path] = processed_files
+                            
+                            # Remove media files if --rm flag is set (but keep JSON for now)
+                            if self.remove_originals and processed_files:
+                                for media_path in processed_files:
+                                    try:
+                                        media_path.unlink()
+                                        self.logger.debug(f"Removed original media file: {media_path}")
+                                    except OSError as e:
+                                        self.logger.error(f"Error removing media file {media_path}: {e}")
+                        else:
+                            self.processing_results['json_failed'] += 1
             
-            self.logger.info(f"Phase 1 complete: {len(exact_matched_files)} files exactly matched")
-            
-            # Process exact matches
-            for json_path, title, timestamp, matching_files in exact_match_results:
-                self._process_json_with_files(json_path, title, timestamp, matching_files)
+            self.logger.info(f"Phase 1 complete: {len(exact_matched_media_files)} media files exactly matched")
             
             self.logger.info("Starting Phase 2: Pattern matching for remaining files...")
             
             # Phase 2b: Pattern matching pass for remaining JSON files
             for json_path in json_files_to_process:
-                # Skip if already processed in exact match phase
-                if any(json_path == result[0] for result in exact_match_results):
-                    continue
-                    
                 metadata = self.extract_metadata(json_path)
                 if metadata:
                     title, timestamp = metadata
-                    pattern_matches = self.find_pattern_matching_media_files(title, exact_matched_files)
+                    # Pattern match against files NOT already matched in either phase
+                    all_excluded_files = exact_matched_media_files.union(pattern_matched_media_files)
+                    pattern_matches = self.find_pattern_matching_media_files(title, all_excluded_files)
+                    
                     if pattern_matches:
                         self.logger.debug(f"Pattern match: {json_path.name} -> {pattern_matches}")
-                        self._process_json_with_files(json_path, title, timestamp, pattern_matches)
+                        
+                        # Process each matching media file
+                        processed_files = []
+                        all_successful = True
+                        files_copied_this_json = 0
+                        
+                        for filename in pattern_matches:
+                            source_path = self.media_file_index[filename]
+                            
+                            # Mark as accounted for
+                            self.accounted_for_media.add(filename)
+                            pattern_matched_media_files.add(filename)
+                            
+                            # Calculate destination and process file
+                            destination = self.calculate_destination_path(source_path, filename)
+                            
+                            # Check if already processed
+                            if self.check_file_already_processed(destination, timestamp):
+                                self.logger.debug(f"Skipping already processed file: {filename}")
+                                processed_files.append(source_path)
+                                continue
+                            
+                            # Handle collisions
+                            if destination.exists():
+                                destination = self.handle_filename_collision(destination)
+                            
+                            # Copy and timestamp
+                            if self.copy_and_timestamp_file(source_path, destination, timestamp):
+                                files_copied_this_json += 1
+                                processed_files.append(source_path)
+                                self.logger.info(f"Processed (pattern): {filename} -> {destination.name}")
+                            else:
+                                all_successful = False
+                                self.processing_results['copy_errors'] += 1
+                                self.processing_results['failed_items'].append({
+                                    'type': 'media',
+                                    'file': str(source_path),
+                                    'reason': 'Copy operation failed'
+                                })
+                        
+                        # Update processing counts
+                        self.processing_results['json_processed'] += 1
+                        self.processing_results['media_processed'] += len(pattern_matches)
+                        self.processing_results['files_copied'] += files_copied_this_json
+                        
+                        if all_successful:
+                            self.processing_results['json_successful'] += 1
+                            successfully_processed_json_files.add(json_path)
+                            json_to_media_mapping[json_path] = processed_files
+                            
+                            # Remove media files if --rm flag is set (but keep JSON for now)
+                            if self.remove_originals and processed_files:
+                                for media_path in processed_files:
+                                    try:
+                                        media_path.unlink()
+                                        self.logger.debug(f"Removed original media file: {media_path}")
+                                    except OSError as e:
+                                        self.logger.error(f"Error removing media file {media_path}: {e}")
+                        else:
+                            self.processing_results['json_failed'] += 1
                     else:
                         # No matches found
                         self.processing_results['json_processed'] += 1
@@ -710,7 +850,23 @@ class MediaMetadataProcessor:
                         'reason': 'Failed to extract metadata'
                     })
             
-            self.logger.info("Phase 2 complete: Pattern matching finished")
+            self.logger.info(f"Phase 2 complete: {len(pattern_matched_media_files)} additional media files matched via pattern matching")
+            
+            # Clean up JSON files after both phases are complete
+            if self.remove_originals:
+                for json_path in successfully_processed_json_files:
+                    try:
+                        # In skipped mode, only remove JSON files from the skipped log
+                        if self.skipped_file and self.skipped_file.exists():
+                            if hasattr(self, 'skipped_json_paths') and json_path in self.skipped_json_paths:
+                                json_path.unlink()
+                                self.logger.debug(f"Removed original JSON from skipped log: {json_path}")
+                        else:
+                            # Standard mode - remove all successfully processed JSON files
+                            json_path.unlink()
+                            self.logger.debug(f"Removed original JSON: {json_path}")
+                    except OSError as e:
+                        self.logger.error(f"Error removing JSON file {json_path}: {e}")
             
             # Phase 3: Reconciliation of Unmatched Media (skip in skipped mode)
             self.reconcile_unmatched_media()
