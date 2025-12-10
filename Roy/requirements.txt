@@ -1,0 +1,7 @@
+Pillow>=9.0.0
+exifread>=3.0.0
+opencv-python>=4.5.0
+reverse_geocoder>=1.5.1
+reportlab>=4.0.0
+pycountry>=22.3.5
+pillow-heif>=0.10.0
