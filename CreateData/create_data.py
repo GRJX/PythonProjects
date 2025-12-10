@@ -31,6 +31,105 @@ def generate_random_text(size):
     """Generates a block of random text of a given size."""
     return ''.join(random.choices(string.ascii_letters + string.digits + string.punctuation + ' ', k=size))
 
+def create_minimal_pdf(file_path, size_bytes):
+    """
+    Creates a minimal PDF file that passes magic number check but is smaller than normal PDF minimum.
+    This creates an INVALID/CORRUPTED PDF that only has the header - useful for testing validation.
+    """
+    target_size = size_bytes
+    
+    if target_size < 5:
+        print(f"Error: Cannot create PDF smaller than 5 bytes (minimum for '%PDF-' header)")
+        sys.exit(1)
+    
+    print(f"Creating minimal PDF '{file_path}' of {size_bytes} bytes.")
+    print("WARNING: This will be a CORRUPTED/INVALID PDF that only passes magic number check!")
+    
+    # PDF magic number header
+    pdf_header = b'%PDF-1.4\n'
+    
+    with open(file_path, 'wb') as f:
+        if target_size <= len(pdf_header):
+            # Write only partial header to reach exact size
+            f.write(pdf_header[:target_size])
+        else:
+            # Write full header + padding to reach target size
+            f.write(pdf_header)
+            remaining = target_size - len(pdf_header)
+            # Add random comment lines (comments in PDF start with %)
+            padding = b'%' + os.urandom(remaining - 1)
+            f.write(padding)
+    
+    actual_size = os.path.getsize(file_path)
+    print(f"Successfully created '{file_path}'.")
+    print(f"File size: {actual_size} bytes")
+    print(f"Magic number: {open(file_path, 'rb').read(5)}")
+    print(f"This file passes magic number check but is NOT a valid PDF!")
+
+def create_minimal_xlsx(file_path, size_bytes):
+    """
+    Creates a minimal Excel file that passes magic number check but is smaller than normal XLSX minimum.
+    This creates an INVALID/CORRUPTED XLSX - useful for testing validation.
+    """
+    target_size = size_bytes
+    
+    if target_size < 4:
+        print(f"Error: Cannot create XLSX smaller than 4 bytes (minimum for ZIP magic number)")
+        sys.exit(1)
+    
+    print(f"Creating minimal XLSX '{file_path}' of {size_bytes} bytes.")
+    print("WARNING: This will be a CORRUPTED/INVALID XLSX that only passes magic number check!")
+    
+    # XLSX files are ZIP archives, so they start with ZIP magic number
+    zip_header = b'PK\x03\x04'
+    
+    with open(file_path, 'wb') as f:
+        if target_size <= len(zip_header):
+            f.write(zip_header[:target_size])
+        else:
+            f.write(zip_header)
+            remaining = target_size - len(zip_header)
+            # Add random padding
+            f.write(os.urandom(remaining))
+    
+    actual_size = os.path.getsize(file_path)
+    print(f"Successfully created '{file_path}'.")
+    print(f"File size: {actual_size} bytes")
+    print(f"Magic number: {open(file_path, 'rb').read(4)}")
+    print(f"This file passes magic number check but is NOT a valid XLSX!")
+
+def create_minimal_docx(file_path, size_bytes):
+    """
+    Creates a minimal Word file that passes magic number check but is smaller than normal DOCX minimum.
+    This creates an INVALID/CORRUPTED DOCX - useful for testing validation.
+    """
+    target_size = size_bytes
+    
+    if target_size < 4:
+        print(f"Error: Cannot create DOCX smaller than 4 bytes (minimum for ZIP magic number)")
+        sys.exit(1)
+    
+    print(f"Creating minimal DOCX '{file_path}' of {size_bytes} bytes.")
+    print("WARNING: This will be a CORRUPTED/INVALID DOCX that only passes magic number check!")
+    
+    # DOCX files are ZIP archives, so they start with ZIP magic number
+    zip_header = b'PK\x03\x04'
+    
+    with open(file_path, 'wb') as f:
+        if target_size <= len(zip_header):
+            f.write(zip_header[:target_size])
+        else:
+            f.write(zip_header)
+            remaining = target_size - len(zip_header)
+            # Add random padding
+            f.write(os.urandom(remaining))
+    
+    actual_size = os.path.getsize(file_path)
+    print(f"Successfully created '{file_path}'.")
+    print(f"File size: {actual_size} bytes")
+    print(f"Magic number: {open(file_path, 'rb').read(4)}")
+    print(f"This file passes magic number check but is NOT a valid DOCX!")
+
 def create_pdf(file_path, size_mb):
     """
     Creates a PDF file of a specific size in MB using an iterative approach.
@@ -345,12 +444,40 @@ def main():
     if len(sys.argv) < 3:
         print("Usage: python create_data.py <file_extension> <size_in_mb> [num_files]")
         print("Supported extensions: pdf, csv, xlsx, docx, zip")
+        print("\nFor minimal/corrupted files (magic number only):")
+        print("  python create_data.py <file_extension>-minimal <size_in_bytes>")
+        print("  Example: python create_data.py pdf-minimal 500  (creates 500 byte corrupted PDF)")
         print("\nFor zip files:")
         print("  python create_data.py zip <size_in_mb> <num_files>")
         print("  Example: python create_data.py zip 10 100  (creates 10MB zip with 100 files)")
         sys.exit(1)
 
     ext = sys.argv[1].lower()
+    
+    # Handle minimal/corrupted files (for testing magic number vs size validation)
+    if ext.endswith('-minimal'):
+        base_ext = ext.replace('-minimal', '')
+        if base_ext not in ['pdf', 'xlsx', 'docx']:
+            print(f"Error: Minimal format only supported for pdf, xlsx, docx")
+            sys.exit(1)
+        
+        try:
+            size_bytes = int(sys.argv[2])
+            if size_bytes <= 0:
+                raise ValueError("Size must be positive.")
+        except ValueError as e:
+            print(f"Error: Invalid size '{sys.argv[2]}'. Please provide a positive integer (bytes). Details: {e}")
+            sys.exit(1)
+        
+        file_name = os.path.join(output_dir, f"test_data_minimal_{size_bytes}bytes.{base_ext}")
+        
+        if base_ext == 'pdf':
+            create_minimal_pdf(file_name, size_bytes)
+        elif base_ext == 'xlsx':
+            create_minimal_xlsx(file_name, size_bytes)
+        elif base_ext == 'docx':
+            create_minimal_docx(file_name, size_bytes)
+        return
     
     # Handle zip format specially (requires num_files parameter)
     if ext == 'zip':
@@ -405,9 +532,15 @@ def main():
     else:
         print(f"Error: Unsupported file extension '{ext}'.")
         print("Supported extensions: pdf, csv, xlsx (or excel), docx (or doc), zip")
+        print("For minimal/corrupted files: pdf-minimal, xlsx-minimal, docx-minimal")
         sys.exit(1)
 
 if __name__ == "__main__":
     # Before running, make sure you have the required packages installed:
     # pip install reportlab openpyxl python-docx
+    #
+    # Usage:
+    #   Valid files:    python create_data.py pdf 5
+    #   Minimal files:  python create_data.py pdf-minimal 100
+    #   ZIP archives:   python create_data.py zip 10 100
     main()
