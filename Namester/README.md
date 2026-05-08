@@ -15,7 +15,7 @@ A Python script to organize photos into year-based folders, rename them based on
 Install the required Python packages:
 
 ```bash
-`pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 Or manually:
@@ -59,13 +59,18 @@ The info page is mirrored for double-sided printing alignment.
 ## Workflow
 
 1. Run `organize_photos.py` to organize and crop your photos
-2. Run `create_photo_pdf.py` on the organized photos to create a printable PDF
+2. **Manually verify and correct** filenames (date and location) in the organized folders
+3. Run `create_photo_pdf.py` on the organized photos to create a printable PDF
 
 ```bash
 # Step 1: Organize photos
 python organize_photos.py ~/Pictures/vacation ~/Pictures/organized --size 709
 
-# Step 2: Create PDF from a year folder
+# Step 2: Manually verify and correct filenames
+# Check that dates (YYYY-MM) and locations (Country_City) are correct
+# Rename files as needed to fix any incorrect geolocation or dates
+
+# Step 3: Create PDF from a year folder
 python create_photo_pdf.py ~/Pictures/organized/2024 ~/Documents/photos_2024.pdf
 ```
 

@@ -28,6 +28,8 @@ try:
     from reportlab.lib.units import cm
     from reportlab.pdfgen import canvas
     from reportlab.lib.utils import ImageReader
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
 except ImportError as e:
     print(f"Missing dependency: {e}")
     print("Please install required packages:")
@@ -57,9 +59,9 @@ def parse_filename(filename: str) -> dict:
     # Remove extension
     name = Path(filename).stem
     
-    # Pattern to match: anything_YYYY-MM_number at the end
-    # This handles city names with underscores
-    pattern = r'^(.+?)_(\d{4}-\d{2})_(\d+)$'
+    # Pattern to match: anything_YYYY-MM followed by anything else
+    # This handles city names with underscores and various suffixes
+    pattern = r'^(.+?)_(\d{4}-\d{2}).*$'
     match = re.match(pattern, name)
     
     if match:
@@ -169,8 +171,13 @@ def draw_image_page(c: canvas.Canvas, images: list, page_width: float, page_heig
             c.rect(x, y, IMAGE_SIZE, IMAGE_SIZE)
 
 
-def collect_images(input_dir: str) -> list:
-    """Collect all images from the input directory."""
+def collect_images(input_dir: str, recursive: bool = False) -> list:
+    """Collect all images from the input directory.
+    
+    Args:
+        input_dir: Path to the input directory
+        recursive: If True, search recursively in subdirectories
+    """
     input_path = Path(input_dir)
     
     if not input_path.exists():
@@ -180,8 +187,14 @@ def collect_images(input_dir: str) -> list:
     images = []
     
     # Find all image files
-    for file in sorted(input_path.iterdir()):
-        if file.suffix.lower() in SUPPORTED_FORMATS:
+    if recursive:
+        # Use rglob for recursive search
+        files = sorted(input_path.rglob('*'))
+    else:
+        files = sorted(input_path.iterdir())
+    
+    for file in files:
+        if file.is_file() and file.suffix.lower() in SUPPORTED_FORMATS:
             # Parse filename for location and date
             parsed = parse_filename(file.name)
             
@@ -208,6 +221,29 @@ def create_pdf(images: list, output_path: str):
     # Create the PDF
     c = canvas.Canvas(output_path, pagesize=A4)
     
+    # Register Unicode-compatible fonts
+    use_unicode_font = False
+    try:
+        # Try Arial Unicode MS first (best Unicode support on macOS)
+        pdfmetrics.registerFont(TTFont('UnicodeFont', '/Library/Fonts/Arial Unicode.ttf'))
+        pdfmetrics.registerFont(TTFont('UnicodeFont-Bold', '/Library/Fonts/Arial Unicode.ttf'))
+        use_unicode_font = True
+    except:
+        try:
+            # Try Helvetica Neue (common on macOS)
+            pdfmetrics.registerFont(TTFont('UnicodeFont', '/System/Library/Fonts/Helvetica.ttc'))
+            pdfmetrics.registerFont(TTFont('UnicodeFont-Bold', '/System/Library/Fonts/Helvetica.ttc'))
+            use_unicode_font = True
+        except:
+            try:
+                # Try Arial from Supplemental
+                pdfmetrics.registerFont(TTFont('UnicodeFont', '/System/Library/Fonts/Supplemental/Arial.ttf'))
+                pdfmetrics.registerFont(TTFont('UnicodeFont-Bold', '/System/Library/Fonts/Supplemental/Arial Bold.ttf'))
+                use_unicode_font = True
+            except:
+                # Last resort: use Helvetica (limited Unicode support)
+                print("Warning: Could not load Unicode font. Diacritics may not display correctly.")
+    
     # Process images in batches of IMAGES_PER_PAGE
     total_pages = (len(images) + IMAGES_PER_PAGE - 1) // IMAGES_PER_PAGE
     
@@ -225,7 +261,7 @@ def create_pdf(images: list, output_path: str):
         c.showPage()
         
         # Draw info page (back) - mirror the positions for double-sided printing
-        draw_info_page_mirrored(c, page_images, page_width, page_height)
+        draw_info_page_mirrored(c, page_images, page_width, page_height, use_unicode_font)
         c.showPage()
     
     # Save the PDF
@@ -233,12 +269,27 @@ def create_pdf(images: list, output_path: str):
     print(f"\nPDF created: {output_path}")
 
 
-def draw_info_page_mirrored(c: canvas.Canvas, images: list, page_width: float, page_height: float):
+def draw_info_page_mirrored(c: canvas.Canvas, images: list, page_width: float, page_height: float, use_unicode_font: bool = False):
     """
     Draw a page with info blocks mirrored horizontally for double-sided printing.
     When printed double-sided, the info will align with the image on the front.
+    
+    If the date is in the future or location contains "Onbekend",
+    a blank line is drawn instead for manual input by pen.
     """
     TEXT_PADDING = 1 * cm  # 1 cm padding from border
+    LINE_WIDTH = 4 * cm    # Width of blank lines for handwriting
+    
+    # Determine which fonts to use
+    if use_unicode_font:
+        regular_font = 'UnicodeFont'
+        bold_font = 'UnicodeFont-Bold'
+    else:
+        regular_font = 'Helvetica'
+        bold_font = 'Helvetica-Bold'
+    
+    # Get current date for comparison
+    current_date = datetime.now()
     
     for i, img_data in enumerate(images):
         if i >= IMAGES_PER_PAGE:
@@ -268,32 +319,66 @@ def draw_info_page_mirrored(c: canvas.Canvas, images: list, page_width: float, p
         # Calculate available width for text (IMAGE_SIZE minus 2x padding)
         available_width = IMAGE_SIZE - 2 * TEXT_PADDING
         
-        # Draw border for the info block
-        c.setStrokeColorRGB(0.8, 0.8, 0.8)
-        c.setLineWidth(0.5)
-        c.rect(x, y, IMAGE_SIZE, IMAGE_SIZE)
+        # Check if date or location should be replaced with a blank line
+        is_future_date = (img_data['date'] > current_date)
+        has_unknown_location = ("Onbekend" in img_data['country'] or "Onbekend" in img_data['city'])
         
-        # Draw text centered
-        c.setFillColorRGB(0, 0, 0)
+        c.setFillColorRGB(0.267, 0.267, 0.267)  # #444444
         
-        # Date on first line - larger font
-        date_font_size = 24
-        c.setFont("Helvetica-Bold", date_font_size)
-        date_width = c.stringWidth(date_str, "Helvetica-Bold", date_font_size)
-        c.drawString(center_x - date_width / 2, center_y + 15, date_str)
+        # Date: show blank line if future date, otherwise show text
+        if is_future_date:
+            c.setStrokeColorRGB(0.8, 0.8, 0.8)  # Chinese silver
+            c.setLineWidth(1)
+            line_y_date = center_y + 10
+            c.line(center_x - LINE_WIDTH / 2, line_y_date, 
+                   center_x + LINE_WIDTH / 2, line_y_date)
+        else:
+            date_font_size = 24
+            c.setFont(bold_font, date_font_size)
+            date_width = c.stringWidth(date_str, bold_font, date_font_size)
+            # Encode to handle diacritics properly
+            c.drawString(center_x - date_width / 2, center_y + 15, date_str)
         
-        # Location on second line - larger font, may need to scale down if too wide
-        location_font_size = 18
-        c.setFont("Helvetica", location_font_size)
-        location_width = c.stringWidth(location_str, "Helvetica", location_font_size)
-        
-        # Scale down font if text is too wide for available space
-        while location_width > available_width and location_font_size > 10:
-            location_font_size -= 1
-            c.setFont("Helvetica", location_font_size)
-            location_width = c.stringWidth(location_str, "Helvetica", location_font_size)
-        
-        c.drawString(center_x - location_width / 2, center_y - 20, location_str)
+        # Location: show blank line if unknown, otherwise show text
+        if has_unknown_location:
+            c.setStrokeColorRGB(0.8, 0.8, 0.8)  # Chinese silver
+            c.setLineWidth(1)
+            line_y_location = center_y - 25
+            c.line(center_x - LINE_WIDTH / 2, line_y_location, 
+                   center_x + LINE_WIDTH / 2, line_y_location)
+        else:
+            location_font_size = 18
+            c.setFont(regular_font, location_font_size)
+            location_width = c.stringWidth(location_str, regular_font, location_font_size)
+            
+            # If text is too wide, wrap it to multiple lines
+            if location_width > available_width:
+                # Try to split on comma first
+                parts = [part.strip() for part in location_str.split(',')]
+                lines = []
+                
+                # Check if each part fits
+                for part in parts:
+                    part_width = c.stringWidth(part, regular_font, location_font_size)
+                    if part_width > available_width:
+                        # Part is still too long, reduce font size
+                        temp_font_size = location_font_size
+                        while part_width > available_width and temp_font_size > 10:
+                            temp_font_size -= 1
+                            part_width = c.stringWidth(part, regular_font, temp_font_size)
+                        location_font_size = temp_font_size
+                        c.setFont(regular_font, location_font_size)
+                    lines.append(part)
+                
+                # Draw each line centered
+                line_height = location_font_size * 1.2
+                start_y = center_y - 15 - (len(lines) - 1) * line_height / 2
+                for i, line in enumerate(lines):
+                    line_width = c.stringWidth(line, regular_font, location_font_size)
+                    c.drawString(center_x - line_width / 2, start_y - i * line_height, line)
+            else:
+                # Single line fits, draw normally
+                c.drawString(center_x - location_width / 2, center_y - 20, location_str)
 
 
 def main():
@@ -304,9 +389,11 @@ def main():
 Examples:
     python create_photo_pdf.py ./organized_photos/2024 ./photo_album.pdf
     python create_photo_pdf.py ~/Pictures/vacation ~/Documents/vacation.pdf
+    python create_photo_pdf.py -r ~/Pictures ~/Documents/all_photos.pdf
 
 Input:
     - Directory containing images with filenames like: NL_Amsterdam_0001.jpg
+    - Use -r/--recursive to search subdirectories
     
 Output:
     - PDF with alternating pages:
@@ -327,6 +414,12 @@ Output:
         help='Output PDF file path'
     )
     
+    parser.add_argument(
+        '-r', '--recursive',
+        action='store_true',
+        help='Recursively search for images in subdirectories'
+    )
+    
     args = parser.parse_args()
     
     print("="*50)
@@ -334,11 +427,12 @@ Output:
     print("="*50)
     print(f"Input directory: {args.input_dir}")
     print(f"Output PDF: {args.output_pdf}")
+    print(f"Recursive search: True")
     print(f"Layout: {GRID_COLS}x{GRID_ROWS} grid, {IMAGE_SIZE/cm:.0f}x{IMAGE_SIZE/cm:.0f} cm images")
     print("="*50)
     
-    # Collect images
-    images = collect_images(args.input_dir)
+    # Collect images (always recursive)
+    images = collect_images(args.input_dir, recursive=True)
     
     if not images:
         print("No supported images found in the input directory.")

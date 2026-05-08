@@ -17,6 +17,7 @@ import os
 import sys
 import shutil
 import argparse
+import csv
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
@@ -630,6 +631,279 @@ def sanitize_filename(name: str) -> str:
     return sanitized.strip('_')
 
 
+def is_already_formatted(filename: str) -> bool:
+    """
+    Check if the filename is already in the expected format: <country>_<city>_YYYY-MM<any>
+    
+    Args:
+        filename: The filename to check (without path)
+    
+    Returns:
+        bool: True if the filename matches the expected format, False otherwise
+    
+    Examples:
+        is_already_formatted("Nederland_Amsterdam_2023-05_0001.jpg") -> True
+        is_already_formatted("Zuid Frankrijk_Den Bosch_2045-02.jpg") -> True
+        is_already_formatted("Australië_Clare Valley (Knappstein)_2019-01.JPG") -> True
+        is_already_formatted("IMG_1234.jpg") -> False
+    """
+    import re
+    
+    # Pattern: <country>_<city>_YYYY-MM<any>
+    # Country: letters (including unicode like ë), spaces, parentheses
+    # Underscore separator
+    # City: letters (including unicode), spaces, parentheses
+    # Underscore separator
+    # Date must be YYYY-MM format
+    # After YYYY-MM: accept anything (number, extension, etc.)
+    # Using [^_] to match anything except underscore (which is our separator)
+    pattern = r'^[^_]+_[^_]+_\d{4}-\d{2}.*$'
+    
+    return bool(re.match(pattern, filename))
+
+
+def has_partial_format(filename: str) -> tuple:
+    """
+    Check if the filename has a partial format: <country>_<city> without date.
+    
+    Args:
+        filename: The filename to check (without path)
+    
+    Returns:
+        tuple: (has_format, country, city) where has_format is True if it matches,
+               and country/city are the extracted values
+    
+    Examples:
+        has_partial_format("Nederland_Den Haag.jpg") -> (True, "Nederland", "Den Haag")
+        has_partial_format("Australië_Clare Valley (Knappstein).jpg") -> (True, "Australië", "Clare Valley (Knappstein)")
+        has_partial_format("IMG_1234.jpg") -> (False, None, None)
+    """
+    import re
+    
+    # Remove extension
+    name_without_ext = Path(filename).stem
+    
+    # Pattern: <country>_<city> (no date pattern)
+    # Must have exactly one underscore separating country and city
+    # Country and city can have letters, spaces, parentheses, special characters
+    # Must NOT have a date pattern (YYYY-MM or YYYY-DD)
+    if re.search(r'\d{4}-\d{2}', name_without_ext):
+        return (False, None, None)
+    
+    # Split by underscore - should have exactly 2 parts for country_city
+    parts = name_without_ext.split('_')
+    if len(parts) == 2:
+        country = parts[0].strip()
+        city = parts[1].strip()
+        
+        # Validate that both parts are not empty
+        if country and city:
+            return (True, country, city)
+    
+    return (False, None, None)
+
+
+def confirm_country_city(country: str, city: str, filename: str) -> bool:
+    """
+    Ask the user to confirm if the detected country and city are correct.
+    
+    Args:
+        country: Detected country name
+        city: Detected city name
+        filename: Original filename
+    
+    Returns:
+        bool: True if user confirms, False otherwise
+    """
+    print(f"\n  File: {filename}")
+    print(f"  Detected Country: {country}")
+    print(f"  Detected City: {city}")
+    
+    while True:
+        response = input("  Is this correct? (y/n): ").strip().lower()
+        if response in ['y', 'yes']:
+            return True
+        elif response in ['n', 'no']:
+            return False
+        else:
+            print("  Please enter 'y' or 'n'")
+
+
+def process_partial_format_file(image_file: Path, country: str, city: str, output_path: Path, 
+                                 log_entries: list, target_size: int = None) -> bool:
+    """
+    Process a file with partial format (country_city without date).
+    Uses "Onbekend" as the date and extracts year from EXIF or file metadata.
+    
+    Args:
+        image_file: Path to the source image file
+        country: Country name from filename
+        city: City name from filename
+        output_path: Base output directory path
+        log_entries: List to append log entry to
+        target_size: Optional target size for the cropped image
+    
+    Returns:
+        bool: True if processed successfully, False otherwise
+    """
+    try:
+        # Extract EXIF data to get the year
+        exif_data = get_exif_data(str(image_file))
+        date_taken = get_date_taken(exif_data)
+        
+        if date_taken:
+            year = str(date_taken.year)
+        else:
+            # Fall back to file modification time
+            try:
+                mtime = os.path.getmtime(image_file)
+                date_taken = datetime.fromtimestamp(mtime)
+                year = str(date_taken.year)
+            except:
+                year = "Unknown_Year"
+        
+        # Create year folder
+        year_folder = output_path / year
+        year_folder.mkdir(exist_ok=True)
+        
+        # Sanitize country and city names
+        country_sanitized = sanitize_filename(country)
+        city_sanitized = sanitize_filename(city)
+        
+        # Generate filename with "Onbekend" as date
+        # Format: country_city_Onbekend_number.jpg
+        location_key = f"{year}_{country_sanitized}_{city_sanitized}_Onbekend"
+        
+        # Find next available number
+        counter = 1
+        output_file = year_folder / f"{country_sanitized}_{city_sanitized}_Onbekend_{counter:04d}.jpg"
+        while output_file.exists():
+            counter += 1
+            output_file = year_folder / f"{country_sanitized}_{city_sanitized}_Onbekend_{counter:04d}.jpg"
+        
+        # Crop and save the image with face detection
+        if smart_crop_to_square(str(image_file), str(output_file), target_size):
+            print(f"  Processed (partial format): {year}/{output_file.name}")
+            
+            # Log the name mapping
+            log_entries.append({
+                'original_path': str(image_file),
+                'original_filename': image_file.name,
+                'new_path': str(output_file),
+                'new_filename': output_file.name,
+                'directory': year,
+                'country': country_sanitized,
+                'city': city_sanitized,
+                'date': 'Onbekend'
+            })
+            
+            return True
+        else:
+            return False
+        
+    except Exception as e:
+        print(f"  Error processing partial format file: {e}")
+        return False
+
+
+def process_already_formatted_file(image_file: Path, output_path: Path, log_entries: list, target_size: int = None) -> bool:
+    """
+    Process a file that's already in the correct format.
+    Extracts the year from the filename, crops to 1:1 with face detection,
+    and saves to the appropriate year folder.
+    
+    Args:
+        image_file: Path to the source image file
+        output_path: Base output directory path
+        log_entries: List to append log entry to
+        target_size: Optional target size for the cropped image
+    
+    Returns:
+        bool: True if processed successfully, False otherwise
+    """
+    import re
+    
+    try:
+        filename = image_file.name
+        
+        # Extract year from filename (YYYY-MM pattern)
+        year_match = re.search(r'_(\d{4})-\d{2}', filename)
+        if not year_match:
+            return False
+        
+        year = year_match.group(1)
+        
+        # Create year folder
+        year_folder = output_path / year
+        year_folder.mkdir(exist_ok=True)
+        
+        # Keep the same filename (will be converted to .jpg by smart_crop_to_square)
+        base_name = Path(filename).stem
+        output_file = year_folder / f"{base_name}.jpg"
+        
+        # Handle duplicate filenames
+        if output_file.exists():
+            counter = 1
+            while output_file.exists():
+                output_file = year_folder / f"{base_name}_copy{counter}.jpg"
+                counter += 1
+        
+        # Crop and save the image with face detection
+        if smart_crop_to_square(str(image_file), str(output_file), target_size):
+            print(f"  Processed (already formatted): {year}/{output_file.name}")
+            
+            # Extract location info from filename for logging
+            # Format: country_city_YYYY-MM...
+            # Country and city can contain spaces, underscores are only separators
+            date_match = re.search(r'(\d{4}-\d{2})', filename)
+            if date_match:
+                date_str = date_match.group(1)
+                # Get everything before the date
+                before_date = filename[:date_match.start()].rstrip('_')
+                # Split by underscore to get country and city
+                # Format: "Country Name_City Name"
+                parts = before_date.split('_')
+                if len(parts) >= 2:
+                    # Last underscore separates city from date, second-to-last separates country from city
+                    # Everything before the last underscore
+                    country_and_city = '_'.join(parts)
+                    # Find the separator between country and city (should be the first underscore)
+                    first_underscore = country_and_city.find('_')
+                    if first_underscore > 0:
+                        country = country_and_city[:first_underscore]
+                        city = country_and_city[first_underscore + 1:]
+                    else:
+                        country = parts[0] if len(parts) > 0 else "Unknown"
+                        city = parts[1] if len(parts) > 1 else "Unknown"
+                else:
+                    country = parts[0] if len(parts) > 0 else "Unknown"
+                    city = "Unknown"
+            else:
+                country = "Unknown"
+                city = "Unknown"
+                date_str = "Unknown"
+            
+            # Log the name mapping
+            log_entries.append({
+                'original_path': str(image_file),
+                'original_filename': image_file.name,
+                'new_path': str(output_file),
+                'new_filename': output_file.name,
+                'directory': year,
+                'country': country,
+                'city': city,
+                'date': date_str
+            })
+            
+            return True
+        else:
+            return False
+        
+    except Exception as e:
+        print(f"  Error processing already formatted file: {e}")
+        return False
+
+
 def process_images(input_dir: str, output_dir: str, target_size: int = None):
     """
     Process all images in the input directory.
@@ -637,6 +911,7 @@ def process_images(input_dir: str, output_dir: str, target_size: int = None):
     - Organize by year
     - Rename based on geolocation
     - Crop to 1:1 ratio preserving faces
+    - Create a log file tracking all name changes
     """
     input_path = Path(input_dir)
     output_path = Path(output_dir)
@@ -647,6 +922,10 @@ def process_images(input_dir: str, output_dir: str, target_size: int = None):
     
     # Create output directory if it doesn't exist
     output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Create log file for tracking name changes
+    log_file = output_path / "name_mapping.csv"
+    log_entries = []
     
     # Collect all image files
     image_files = []
@@ -717,6 +996,31 @@ def process_images(input_dir: str, output_dir: str, target_size: int = None):
         date_taken = meta['date_taken']
         
         print(f"\nProcessing: {image_file.name}")
+        
+        # Check if the file is already in the correct format
+        if is_already_formatted(image_file.name):
+            print(f"  Already in correct format, processing with face detection...")
+            if process_already_formatted_file(image_file, output_path, log_entries, target_size):
+                processed += 1
+            else:
+                skipped += 1
+            continue
+        
+        # Check if the file has partial format (country_city without date)
+        has_partial, partial_country, partial_city = has_partial_format(image_file.name)
+        if has_partial:
+            # Ask user for confirmation
+            if confirm_country_city(partial_country, partial_city, image_file.name):
+                print(f"  Using partial format: {partial_country}, {partial_city} (date: Onbekend)")
+                if process_partial_format_file(image_file, partial_country, partial_city, 
+                                              output_path, log_entries, target_size):
+                    processed += 1
+                else:
+                    skipped += 1
+                continue
+            else:
+                print(f"  User rejected partial format, processing with GPS data...")
+        
         print(f"  Location: {country}, {city}" if meta['has_gps'] else f"  No GPS data, using: {country}, {city}")
         
         # Create year folder
@@ -749,22 +1053,65 @@ def process_images(input_dir: str, output_dir: str, target_size: int = None):
         # Crop and save the image
         if smart_crop_to_square(str(image_file), str(output_file), target_size):
             print(f"  Saved as: {year}/{new_filename}")
+            # Log the name mapping
+            log_entries.append({
+                'original_path': str(image_file),
+                'original_filename': image_file.name,
+                'new_path': str(output_file),
+                'new_filename': new_filename,
+                'directory': year,
+                'country': country,
+                'city': city,
+                'date': date_str
+            })
             processed += 1
         else:
             # If cropping fails, try to just copy the file
             print(f"  Warning: Could not crop, copying original")
             try:
                 shutil.copy2(image_file, output_file)
+                # Log the name mapping
+                log_entries.append({
+                    'original_path': str(image_file),
+                    'original_filename': image_file.name,
+                    'new_path': str(output_file),
+                    'new_filename': new_filename,
+                    'directory': year,
+                    'country': country,
+                    'city': city,
+                    'date': date_str
+                })
                 processed += 1
             except Exception as e:
                 print(f"  Error: Could not process image: {e}")
                 skipped += 1
+    
     
     print(f"\n{'='*50}")
     print(f"Processing complete!")
     print(f"  Processed: {processed} images")
     print(f"  Skipped: {skipped} images")
     print(f"  Output directory: {output_path}")
+    
+    # Write the log file
+    if log_entries:
+        try:
+            with open(log_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    'original_filename',
+                    'original_path',
+                    'new_filename',
+                    'new_path',
+                    'directory',
+                    'country',
+                    'city',
+                    'date'
+                ])
+                writer.writeheader()
+                writer.writerows(log_entries)
+            print(f"  Log file: {log_file}")
+        except Exception as e:
+            print(f"  Warning: Could not create log file: {e}")
 
 
 def main():
